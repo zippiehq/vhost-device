@@ -482,7 +482,7 @@ impl VhostUserVsockThread {
     ) {
         // Apply port mapping if available
         let mapped_peer_port = if let BackendType::Vsock(vsock_info) = &self.backend_info {
-            vsock_info.port_mappings.get(&local_port).copied().unwrap_or(peer_port)
+            vsock_info.port_mappings.get(&peer_port).copied().unwrap_or(peer_port)
         } else {
             peer_port
         };

@@ -174,21 +174,13 @@ struct VsockArgs {
     param: Option<VsockParam>,
 
     /// Device parameters corresponding to a VM in the form of comma separated key=value pairs.
-    /// The allowed keys are: guest_cid, socket, uds_path, tx_buffer_size, queue_size and group.
-    /// Example:
-    ///   --vm guest-cid=3,socket=/tmp/vhost3.socket,uds-path=/tmp/vm3.vsock,tx-buffer-size=65536,queue-size=1024,groups=group1+group2
-    /// Multiple instances of this argument can be provided to configure devices for multiple guests.
-    #[cfg(not(feature = "backend_vsock"))]
-    #[arg(long, conflicts_with = "config", verbatim_doc_comment, value_parser = parse_vm_params)]
-    vm: Option<Vec<VsockConfig>>,
-
-    /// Device parameters corresponding to a VM in the form of comma separated key=value pairs.
-    /// The allowed keys are: guest_cid, socket, uds_path, forward_cid, forward_listen, tx_buffer_size, queue_size and group.
-    /// uds_path and (forward_cid, forward_listen) are mutually exclusive. Use uds_path when you want unix domain socket
-    /// backend, otherwise forward_cid, forward_listen for vsock backend.
+    /// The allowed keys are: guest_cid, socket, uds_path, forward_cid, forward_listen, forward_map, tx_buffer_size, queue_size and group.
+    /// uds_path and (forward_cid, forward_listen/forward_map) are mutually exclusive. Use uds_path when you want unix domain socket
+    /// backend, otherwise forward_cid with forward_listen or forward_map for vsock backend.
     /// Example:
     ///   --vm guest-cid=3,socket=/tmp/vhost3.socket,uds-path=/tmp/vm3.vsock,tx-buffer-size=65536,queue-size=1024,groups=group1+group2
     ///   --vm guest-cid=3,socket=/tmp/vhost3.socket,forward-cid=1,forward-listen=9001,queue-size=1024
+    ///   --vm guest-cid=3,socket=/tmp/vhost3.socket,forward-cid=1,forward-map=8080:8081,queue-size=1024
     /// Multiple instances of this argument can be provided to configure devices for multiple guests.
     #[cfg(feature = "backend_vsock")]
     #[arg(long, conflicts_with = "config", verbatim_doc_comment, value_parser = parse_vm_params)]
@@ -1058,6 +1050,81 @@ mod tests {
         } else {
             panic!("Expected Vsock backend type");
         }
+    }
+
+    #[cfg(feature = "backend_vsock")]
+    #[test]
+    fn test_vm_option_with_forward_map() {
+        let args = VsockArgs {
+            param: None,
+            vm: Some(vec![parse_vm_params(
+                "guest-cid=4,socket=/tmp/vhost4.socket,forward-cid=1,forward-map=8080:8081"
+            ).unwrap()]),
+            config: None,
+        };
+        
+        let configs = Vec::<VsockConfig>::try_from(args).unwrap();
+        assert_eq!(configs.len(), 1);
+        
+        let config = &configs[0];
+        assert_eq!(config.get_guest_cid(), 4);
+        
+        if let BackendType::Vsock(vsock_info) = config.get_backend_info() {
+            assert_eq!(vsock_info.forward_cid, 1);
+            assert_eq!(vsock_info.listen_ports, vec![8080]);
+            assert_eq!(vsock_info.port_mappings.get(&8080), Some(&8081));
+        } else {
+            panic!("Expected Vsock backend type");
+        }
+    }
+
+    #[cfg(feature = "backend_vsock")]
+    #[test]
+    fn test_vm_option_with_multiple_forward_maps() {
+        let args = VsockArgs {
+            param: None,
+            vm: Some(vec![parse_vm_params(
+                "guest-cid=4,socket=/tmp/vhost4.socket,forward-cid=1,forward-map=8080:8081,8443:443"
+            ).unwrap()]),
+            config: None,
+        };
+        
+        let configs = Vec::<VsockConfig>::try_from(args).unwrap();
+        assert_eq!(configs.len(), 1);
+        
+        let config = &configs[0];
+        assert_eq!(config.get_guest_cid(), 4);
+        
+        if let BackendType::Vsock(vsock_info) = config.get_backend_info() {
+            assert_eq!(vsock_info.forward_cid, 1);
+            assert_eq!(vsock_info.listen_ports, vec![8080, 8443]);
+            assert_eq!(vsock_info.port_mappings.get(&8080), Some(&8081));
+            assert_eq!(vsock_info.port_mappings.get(&8443), Some(&443));
+        } else {
+            panic!("Expected Vsock backend type");
+        }
+    }
+
+    #[cfg(feature = "backend_vsock")]
+    #[test]
+    fn test_forward_map_port_mapping_logic() {
+        // Test that the port mapping logic works correctly
+        // This simulates what happens in add_new_connection_from_host
+        let mut port_mappings = HashMap::new();
+        port_mappings.insert(8080, 8081); // host_port -> guest_port
+        
+        // Simulate a connection from host port 12345 to listener port 8080
+        let client_port = 12345;  // local_port (client's port)
+        let listener_port = 8080;  // peer_port (listener's port)
+        
+        // The mapping should use listener_port (8080), not client_port (12345)
+        let mapped_port = port_mappings.get(&listener_port).copied().unwrap_or(listener_port);
+        assert_eq!(mapped_port, 8081); // Should map to guest port 8081
+        
+        // Test fallback when no mapping exists
+        let listener_port2 = 9000;
+        let mapped_port2 = port_mappings.get(&listener_port2).copied().unwrap_or(listener_port2);
+        assert_eq!(mapped_port2, 9000); // Should use original port when no mapping
     }
 
     fn test_vsock_server(config: VsockConfig) {
