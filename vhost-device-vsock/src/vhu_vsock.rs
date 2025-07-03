@@ -152,6 +152,7 @@ impl std::convert::From<Error> for std::io::Error {
 pub(crate) struct VsockProxyInfo {
     pub forward_cid: u32,
     pub listen_ports: Vec<u32>,
+    pub port_mappings: HashMap<u32, u32>, // host_port -> guest_port
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -503,6 +504,7 @@ mod tests {
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: 1,
                 listen_ports: vec![9001, 9002],
+                port_mappings: HashMap::new(),
             }),
             CONN_TX_BUF_SIZE,
             QUEUE_SIZE,
@@ -606,13 +608,14 @@ mod tests {
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: 1,
                 listen_ports: vec![9001, 9002],
+                port_mappings: HashMap::new(),
             }),
             0,
             0,
             vec![String::new()],
         );
         #[cfg(feature = "backend_vsock")]
-        assert_eq!(format!("{vsock_config:?}"), "VsockConfig { guest_cid: 0, socket: \"\", backend_info: Vsock(VsockProxyInfo { forward_cid: 1, listen_ports: [9001, 9002] }), tx_buffer_size: 0, queue_size: 0, groups: [\"\"] }");
+        assert_eq!(format!("{vsock_config:?}"), "VsockConfig { guest_cid: 0, socket: \"\", backend_info: Vsock(VsockProxyInfo { forward_cid: 1, listen_ports: [9001, 9002], port_mappings: {} }), tx_buffer_size: 0, queue_size: 0, groups: [\"\"] }");
 
         let conn_map = ConnMapKey::new(0, 0);
         assert_eq!(

@@ -120,6 +120,17 @@ struct VsockParam {
     )]
     forward_listen: Option<String>,
 
+    /// Port mappings from host to guest (format: "host_port:guest_port,host_port2:guest_port2")
+    #[cfg(feature = "backend_vsock")]
+    #[clap(
+        long,
+        conflicts_with = "uds_path",
+        conflicts_with = "forward_listen",
+        conflicts_with = "config",
+        conflicts_with = "vm"
+    )]
+    forward_map: Option<String>,
+
     /// The size of the buffer used for the TX virtqueue
     #[clap(long, default_value_t = DEFAULT_TX_BUFFER_SIZE, conflicts_with = "config", conflicts_with = "vm")]
     tx_buffer_size: u32,
@@ -149,6 +160,8 @@ struct ConfigFileVsockParam {
     forward_cid: Option<u32>,
     #[cfg(feature = "backend_vsock")]
     forward_listen: Option<String>,
+    #[cfg(feature = "backend_vsock")]
+    forward_map: Option<String>,
     tx_buffer_size: Option<u32>,
     queue_size: Option<usize>,
     groups: Option<String>,
@@ -198,6 +211,8 @@ fn parse_vm_params(s: &str) -> Result<VsockConfig, VmArgsParseError> {
     let mut forward_cid = None;
     #[cfg(feature = "backend_vsock")]
     let mut forward_listen: Option<Vec<u32>> = None;
+    #[cfg(feature = "backend_vsock")]
+    let mut forward_map: Option<HashMap<u32, u32>> = None;
 
     for arg in s.trim().split(',') {
         let mut parts = arg.split('=');
@@ -219,6 +234,21 @@ fn parse_vm_params(s: &str) -> Result<VsockConfig, VmArgsParseError> {
             "forward_listen" | "forward-listen" => {
                 forward_listen = Some(val.split('+').map(|s| s.parse().unwrap()).collect())
             }
+            #[cfg(feature = "backend_vsock")]
+            "forward_map" | "forward-map" => {
+                let mut mappings = HashMap::new();
+                for mapping in val.split(',') {
+                    let parts: Vec<&str> = mapping.split(':').collect();
+                    if parts.len() == 2 {
+                        let host_port: u32 = parts[0].parse().map_err(VmArgsParseError::ParseInteger)?;
+                        let guest_port: u32 = parts[1].parse().map_err(VmArgsParseError::ParseInteger)?;
+                        mappings.insert(host_port, guest_port);
+                    } else {
+                        return Err(VmArgsParseError::InvalidKey(format!("Invalid port mapping: {}", mapping)));
+                    }
+                }
+                forward_map = Some(mappings);
+            }
 
             "tx_buffer_size" | "tx-buffer-size" => {
                 tx_buffer_size = Some(val.parse().map_err(VmArgsParseError::ParseInteger)?)
@@ -236,9 +266,19 @@ fn parse_vm_params(s: &str) -> Result<VsockConfig, VmArgsParseError> {
         (Some(path), None) => BackendType::UnixDomainSocket(path),
         (None, Some(cid)) => {
             let listen_ports: Vec<u32> = forward_listen.unwrap_or_default();
+            let port_mappings: HashMap<u32, u32> = forward_map.unwrap_or_default();
+            
+            // If port mappings are provided, use them to determine listen ports
+            let final_listen_ports = if !port_mappings.is_empty() {
+                port_mappings.keys().cloned().collect()
+            } else {
+                listen_ports
+            };
+            
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: cid,
-                listen_ports,
+                listen_ports: final_listen_ports,
+                port_mappings,
             })
         }
         (None, None) => {
@@ -295,9 +335,33 @@ impl VsockArgs {
                                         ports.split('+').map(|s| s.parse().unwrap()).collect()
                                     }
                                 };
+                                let port_mappings: HashMap<u32, u32> = match p.forward_map {
+                                    None => HashMap::new(),
+                                    Some(mappings) => {
+                                        let mut map = HashMap::new();
+                                        for mapping in mappings.split(',') {
+                                            let parts: Vec<&str> = mapping.split(':').collect();
+                                            if parts.len() == 2 {
+                                                let host_port: u32 = parts[0].parse().unwrap();
+                                                let guest_port: u32 = parts[1].parse().unwrap();
+                                                map.insert(host_port, guest_port);
+                                            }
+                                        }
+                                        map
+                                    }
+                                };
+                                
+                                // If port mappings are provided, use them to determine listen ports
+                                let final_listen_ports = if !port_mappings.is_empty() {
+                                    port_mappings.keys().cloned().collect()
+                                } else {
+                                    listen_ports
+                                };
+                                
                                 BackendType::Vsock(VsockProxyInfo {
                                     forward_cid: cid,
-                                    listen_ports,
+                                    listen_ports: final_listen_ports,
+                                    port_mappings,
                                 })
                             }
                             _ => return Some(Err(CliError::ConfigParse)),
@@ -353,9 +417,33 @@ impl TryFrom<VsockArgs> for Vec<VsockConfig> {
                                     ports.split('+').map(|s| s.parse().unwrap()).collect()
                                 }
                             };
+                            let port_mappings: HashMap<u32, u32> = match p.forward_map {
+                                None => HashMap::new(),
+                                Some(mappings) => {
+                                    let mut map = HashMap::new();
+                                    for mapping in mappings.split(',') {
+                                        let parts: Vec<&str> = mapping.split(':').collect();
+                                        if parts.len() == 2 {
+                                            let host_port: u32 = parts[0].parse().unwrap();
+                                            let guest_port: u32 = parts[1].parse().unwrap();
+                                            map.insert(host_port, guest_port);
+                                        }
+                                    }
+                                    map
+                                }
+                            };
+                            
+                            // If port mappings are provided, use them to determine listen ports
+                            let final_listen_ports = if !port_mappings.is_empty() {
+                                port_mappings.keys().cloned().collect()
+                            } else {
+                                listen_ports
+                            };
+                            
                             BackendType::Vsock(VsockProxyInfo {
                                 forward_cid: cid,
-                                listen_ports,
+                                listen_ports: final_listen_ports,
+                                port_mappings,
                             })
                         }
                         _ => return Err(CliError::ConfigParse),
@@ -496,12 +584,12 @@ mod tests {
                     guest_cid,
                     socket: socket.to_path_buf(),
                     uds_path: Some(uds_path.to_path_buf()),
-
                     #[cfg(feature = "backend_vsock")]
                     forward_cid: None,
                     #[cfg(feature = "backend_vsock")]
                     forward_listen: None,
-
+                    #[cfg(feature = "backend_vsock")]
+                    forward_map: None,
                     tx_buffer_size,
                     queue_size,
                     groups: groups.to_string(),
@@ -528,6 +616,8 @@ mod tests {
                     uds_path: None,
                     forward_cid: Some(forward_cid),
                     forward_listen: Some(forward_listen.to_string()),
+                    #[cfg(feature = "backend_vsock")]
+                    forward_map: None,
                     tx_buffer_size,
                     queue_size,
                     groups: groups.to_string(),
@@ -596,7 +686,8 @@ mod tests {
             config.get_backend_info(),
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: 1,
-                listen_ports: vec![1234, 4321]
+                listen_ports: vec![1234, 4321],
+                port_mappings: HashMap::new(),
             })
         );
         assert_eq!(config.get_tx_buffer_size(), 64 * 1024);
@@ -766,7 +857,8 @@ mod tests {
             config.get_backend_info(),
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: 1,
-                listen_ports: vec![1234, 4321]
+                listen_ports: vec![1234, 4321],
+                port_mappings: HashMap::new(),
             })
         );
         assert_eq!(config.get_tx_buffer_size(), 65536);
@@ -910,7 +1002,8 @@ mod tests {
             config.get_backend_info(),
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: 1,
-                listen_ports: vec![1234, 4321]
+                listen_ports: vec![1234, 4321],
+                port_mappings: HashMap::new(),
             })
         );
         assert_eq!(config.get_tx_buffer_size(), 32768);
@@ -948,6 +1041,23 @@ mod tests {
 
         std::fs::remove_file(&config_path).unwrap();
         test_dir.close().unwrap();
+    }
+
+    #[cfg(feature = "backend_vsock")]
+    #[test]
+    fn test_vsock_config_setup_forward_map() {
+        let config = parse_vm_params(
+            "guest-cid=4,socket=/tmp/vhost4.socket,forward-cid=1,forward-map=8080:80,8443:443"
+        ).unwrap();
+        
+        if let BackendType::Vsock(vsock_info) = config.get_backend_info() {
+            assert_eq!(vsock_info.forward_cid, 1);
+            assert_eq!(vsock_info.listen_ports, vec![8080, 8443]);
+            assert_eq!(vsock_info.port_mappings.get(&8080), Some(&80));
+            assert_eq!(vsock_info.port_mappings.get(&8443), Some(&443));
+        } else {
+            panic!("Expected Vsock backend type");
+        }
     }
 
     fn test_vsock_server(config: VsockConfig) {
@@ -1019,6 +1129,7 @@ mod tests {
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: 1,
                 listen_ports: vec![9000],
+                port_mappings: HashMap::new(),
             }),
             CONN_TX_BUF_SIZE,
             QUEUE_SIZE,
@@ -1141,6 +1252,8 @@ mod tests {
             uds_path: Some(PathBuf::new()),
             forward_cid: None,
             forward_listen: None,
+            #[cfg(feature = "backend_vsock")]
+            forward_map: None,
             tx_buffer_size: None,
             queue_size: None,
             groups: None,
@@ -1154,6 +1267,8 @@ mod tests {
             uds_path: None,
             forward_cid: Some(1),
             forward_listen: Some(String::new()),
+            #[cfg(feature = "backend_vsock")]
+            forward_map: None,
             tx_buffer_size: None,
             queue_size: None,
             groups: None,

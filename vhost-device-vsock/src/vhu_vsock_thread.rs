@@ -480,32 +480,39 @@ impl VhostUserVsockThread {
         local_port: u32,
         peer_port: u32,
     ) {
+        // Apply port mapping if available
+        let mapped_peer_port = if let BackendType::Vsock(vsock_info) = &self.backend_info {
+            vsock_info.port_mappings.get(&local_port).copied().unwrap_or(peer_port)
+        } else {
+            peer_port
+        };
+
         // Insert the fd into the backend's maps
         self.thread_backend
             .listener_map
-            .insert(fd, ConnMapKey::new(local_port, peer_port));
+            .insert(fd, ConnMapKey::new(local_port, mapped_peer_port));
 
-        // Create a new connection object an enqueue a connection request
+        // Create a new connection object and enqueue a connection request
         // packet to be sent to the guest
-        let conn_map_key = ConnMapKey::new(local_port, peer_port);
+        let conn_map_key = ConnMapKey::new(local_port, mapped_peer_port);
         let mut new_conn = VsockConnection::new_local_init(
             stream,
             VSOCK_HOST_CID,
             local_port,
             self.guest_cid,
-            peer_port,
+            mapped_peer_port,  // Use mapped port
             self.get_epoll_fd(),
             self.tx_buffer_size,
         );
         new_conn.rx_queue.enqueue(RxOps::Request);
-        new_conn.set_peer_port(peer_port);
+        new_conn.set_peer_port(mapped_peer_port);  // Use mapped port
 
         // Add connection object into the backend's maps
         self.thread_backend.conn_map.insert(conn_map_key, new_conn);
 
         self.thread_backend
             .backend_rxq
-            .push_back(ConnMapKey::new(local_port, peer_port));
+            .push_back(ConnMapKey::new(local_port, mapped_peer_port));
     }
 
     /// Allocate a new local port number.
@@ -921,6 +928,7 @@ mod tests {
         let backend_info = BackendType::Vsock(VsockProxyInfo {
             forward_cid: 1,
             listen_ports: vec![],
+            port_mappings: HashMap::new(),
         });
         test_vsock_thread(backend_info);
     }
@@ -1043,6 +1051,7 @@ mod tests {
             BackendType::Vsock(VsockProxyInfo {
                 forward_cid: VMADDR_CID_LOCAL,
                 listen_ports: vec![9003, 9004],
+                port_mappings: HashMap::new(),
             }),
             3,
             CONN_TX_BUF_SIZE,
