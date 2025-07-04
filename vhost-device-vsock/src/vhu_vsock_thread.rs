@@ -522,7 +522,7 @@ impl VhostUserVsockThread {
         new_conn.set_peer_port(mapped_peer_port);  // Use mapped port
 
         // Add connection object into the backend's maps
-        self.thread_backend.conn_map.insert(conn_map_key, new_conn);
+        self.thread_backend.conn_map.insert(conn_map_key.clone(), new_conn);
 
         self.thread_backend
             .backend_rxq
