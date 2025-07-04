@@ -348,12 +348,16 @@ impl VhostUserVsockThread {
 
                                 let local_port = addr.port();
                                 let stream_raw_fd = stream.as_raw_fd();
+                                
+                                // Fix: Complete connection setup first
                                 self.add_new_connection_from_host(
                                     stream_raw_fd,
                                     StreamType::Vsock(stream),
                                     local_port,
                                     peer_port,
                                 );
+                                
+                                // Fix: Register with epoll only after connection is fully established
                                 if let Err(err) = Self::epoll_register(
                                     self.get_epoll_fd(),
                                     stream_raw_fd,
@@ -361,6 +365,10 @@ impl VhostUserVsockThread {
                                 ) {
                                     warn!("Failed to register with epoll: {:?}", err);
                                 }
+                                
+                                // Fix: Add a small delay to ensure connection is fully established
+                                // This prevents race conditions with immediate data transmission
+                                std::thread::sleep(std::time::Duration::from_millis(1));
                             }
                             Err(err) => {
                                 warn!("Unable to accept new local connection: {:?}", err);
@@ -434,6 +442,12 @@ impl VhostUserVsockThread {
                 let epoll_fd = self.get_epoll_fd();
                 let key = self.thread_backend.listener_map.get(&fd).unwrap();
                 let conn = self.thread_backend.conn_map.get_mut(key).unwrap();
+
+                // Fix: Only process data for established connections
+                if !conn.is_established {
+                    warn!("Ignoring data event for non-established connection fd={}", fd);
+                    return;
+                }
 
                 if evset.bits() == epoll::Events::EPOLLOUT.bits() {
                     // Flush any remaining data from the tx buffer
@@ -513,6 +527,11 @@ impl VhostUserVsockThread {
         self.thread_backend
             .backend_rxq
             .push_back(ConnMapKey::new(local_port, mapped_peer_port));
+            
+        // Fix: Mark connection as established after all setup is complete
+        if let Some(conn) = self.thread_backend.conn_map.get_mut(&conn_map_key) {
+            conn.is_established = true;
+        }
     }
 
     /// Allocate a new local port number.

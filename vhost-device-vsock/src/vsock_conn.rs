@@ -54,6 +54,8 @@ pub(crate) struct VsockConnection<S> {
     pub tx_buf: LocalTxBuf,
     /// Local tx buffer size
     tx_buffer_size: u32,
+    /// Connection state: true if fully established and ready for data
+    pub is_established: bool,
 }
 
 impl<S: AsRawFd + ReadVolatile + Write + WriteVolatile + IsHybridVsock> VsockConnection<S> {
@@ -84,6 +86,7 @@ impl<S: AsRawFd + ReadVolatile + Write + WriteVolatile + IsHybridVsock> VsockCon
             epoll_fd,
             tx_buf: LocalTxBuf::new(tx_buffer_size),
             tx_buffer_size,
+            is_established: false,
         }
     }
 
@@ -118,6 +121,7 @@ impl<S: AsRawFd + ReadVolatile + Write + WriteVolatile + IsHybridVsock> VsockCon
             epoll_fd,
             tx_buf: LocalTxBuf::new(tx_buffer_size),
             tx_buffer_size,
+            is_established: false,
         }
     }
 
